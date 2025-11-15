@@ -1,0 +1,4 @@
+/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/server.dir
+/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/single-coroutine-server.dir
+/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/edit_cache.dir
+/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/rebuild_cache.dir
