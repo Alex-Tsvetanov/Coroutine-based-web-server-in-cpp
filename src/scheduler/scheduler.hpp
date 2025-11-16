@@ -3,16 +3,18 @@
 #include "task.hpp"
 #include "thread_pool.hpp"
 
+#include "../net/io_reactor.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
-#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,6 +30,9 @@ class Scheduler: public std::enable_shared_from_this<Scheduler>
 {
 public:
   using TaskHandle = Task::handle_type;
+  using ReactorEvent = net::IoReactor::Event;
+  using ReactorCallback = std::function<void(const ReactorEvent&)>;
+  using IoHandle = std::uintptr_t;
 
   explicit Scheduler(std::size_t worker_count);
   ~Scheduler();
@@ -63,9 +68,9 @@ public:
 
   struct IoAwaiter
   {
-    IoAwaiter(Scheduler& scheduler, int fd, IOCondition condition) noexcept
+    IoAwaiter(Scheduler& scheduler, IoHandle handle, IOCondition condition) noexcept
       : scheduler_(scheduler)
-      , fd_(fd)
+      , handle_(handle)
       , condition_(condition)
     {}
 
@@ -75,15 +80,29 @@ public:
 
   private:
     Scheduler& scheduler_;
-    int fd_;
+    IoHandle handle_;
     IOCondition condition_;
   };
 
-  IoAwaiter wait_io(int fd, IOCondition condition) noexcept { return IoAwaiter{*this, fd, condition}; }
+  IoAwaiter wait_io(IoHandle handle, IOCondition condition) noexcept { return IoAwaiter{*this, handle, condition}; }
+  IoAwaiter wait_io_fd(int fd, IOCondition condition) noexcept
+  {
+    return IoAwaiter{*this, static_cast<IoHandle>(fd), condition};
+  }
 
-  void notify_io_ready(int fd, IOCondition condition);
+  void notify_io_ready(IoHandle handle, IOCondition condition);
+  void wake_task(TaskHandle handle);
 
   void wait_idle();
+
+  void set_io_reactor(std::unique_ptr<net::IoReactor> reactor);
+  [[nodiscard]] static std::unique_ptr<net::IoReactor> create_default_reactor();
+  net::IoReactor* io_reactor() const noexcept;
+
+  void register_reactor_context(void* context, ReactorCallback callback);
+  void unregister_reactor_context(void* context);
+
+  static std::uintptr_t encode_io_key(int fd, IOCondition condition) noexcept;
 
   // Hooks used by Task internals
   bool await_subtask(Task::awaiter& aw, std::coroutine_handle<>);
@@ -110,17 +129,20 @@ private:
 
   struct IoKey
   {
-    int fd;
+    IoHandle handle;
     IOCondition condition;
 
-    bool operator==(const IoKey& other) const noexcept { return fd == other.fd && condition == other.condition; }
+    bool operator==(const IoKey& other) const noexcept
+    {
+      return handle == other.handle && condition == other.condition;
+    }
   };
 
   struct IoKeyHasher
   {
     std::size_t operator()(const IoKey& key) const noexcept
     {
-      return std::hash<int>{}(key.fd) ^ (std::hash<int>{}(static_cast<int>(key.condition)) << 1);
+      return std::hash<IoHandle>{}(key.handle) ^ (std::hash<int>{}(static_cast<int>(key.condition)) << 1);
     }
   };
 
@@ -134,11 +156,14 @@ private:
   void enqueue_after_sequence(TaskHandle handle);
   void release_sequence(std::size_t key, TaskHandle finished);
 
-  void mark_waiting_io(TaskHandle handle, int fd, IOCondition condition);
+  void mark_waiting_io(TaskHandle handle, IoHandle io_handle, IOCondition condition);
 
   void request_reschedule(TaskHandle handle) noexcept;
 
   TaskState* lookup_state(TaskHandle handle);
+  void handle_reactor_event(const ReactorEvent& event);
+  static std::pair<int, IOCondition> decode_io_key(std::uintptr_t key) noexcept;
+  void stop_reactor();
 
   ThreadPool workers_;
 
@@ -159,4 +184,8 @@ private:
   std::atomic<std::size_t> active_tasks_{0};
   std::mutex idle_mutex_;
   std::condition_variable idle_cv_;
+
+  std::unique_ptr<net::IoReactor> reactor_;
+  mutable std::mutex reactor_mutex_;
+  std::unordered_map<void*, ReactorCallback> reactor_contexts_;
 };

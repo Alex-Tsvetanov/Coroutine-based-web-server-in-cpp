@@ -1,10 +1,16 @@
 #include "scheduler.hpp"
 
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#include "../net/win32_iocp_reactor.hpp"
+#endif
 
 struct Task::promise_type::SharedState
 {
@@ -19,6 +25,128 @@ Task::promise_type::promise_type()
   , sequence_key(std::nullopt)
   , state(std::make_shared<SharedState>())
 {}
+
+void Scheduler::set_io_reactor(std::unique_ptr<net::IoReactor> reactor)
+{
+  stop_reactor();
+
+  if (!reactor)
+  {
+    return;
+  }
+
+  std::weak_ptr<Scheduler> weak = shared_from_this();
+  auto callback = [weak](const ReactorEvent& event) {
+    if (auto self = weak.lock())
+    {
+      self->handle_reactor_event(event);
+    }
+  };
+
+  if (!reactor->start(callback))
+  {
+    reactor->stop();
+    throw std::runtime_error("Failed to start IO reactor");
+  }
+
+  std::lock_guard lock(reactor_mutex_);
+  reactor_ = std::move(reactor);
+}
+
+std::unique_ptr<net::IoReactor> Scheduler::create_default_reactor()
+{
+#ifdef _WIN32
+  auto derived = std::make_unique<net::Win32IocpReactor>();
+  return std::unique_ptr<net::IoReactor>(derived.release());
+#else
+  return nullptr;
+#endif
+}
+
+net::IoReactor* Scheduler::io_reactor() const noexcept
+{
+  std::lock_guard lock(reactor_mutex_);
+  return reactor_.get();
+}
+
+void Scheduler::register_reactor_context(void* context, ReactorCallback callback)
+{
+  if (context == nullptr || !callback)
+  {
+    return;
+  }
+
+  std::lock_guard lock(reactor_mutex_);
+  reactor_contexts_[context] = std::move(callback);
+}
+
+void Scheduler::unregister_reactor_context(void* context)
+{
+  if (context == nullptr)
+  {
+    return;
+  }
+
+  std::lock_guard lock(reactor_mutex_);
+  reactor_contexts_.erase(context);
+}
+
+std::uintptr_t Scheduler::encode_io_key(int fd, IOCondition condition) noexcept
+{
+  constexpr std::uintptr_t mask = 0x3;
+  auto condition_bits = static_cast<std::uintptr_t>(static_cast<int>(condition) & mask);
+  return (static_cast<std::uintptr_t>(fd) << 2) | condition_bits;
+}
+
+std::pair<int, IOCondition> Scheduler::decode_io_key(std::uintptr_t key) noexcept
+{
+  constexpr std::uintptr_t mask = 0x3;
+  auto condition_bits = static_cast<std::uintptr_t>(key & mask);
+  IOCondition condition = static_cast<IOCondition>(condition_bits);
+  int fd = static_cast<int>(key >> 2);
+  return {fd, condition};
+}
+
+void Scheduler::handle_reactor_event(const ReactorEvent& event)
+{
+  ReactorCallback callback;
+  if (event.context)
+  {
+    std::lock_guard lock(reactor_mutex_);
+    auto it = reactor_contexts_.find(event.context);
+    if (it != reactor_contexts_.end())
+    {
+      callback = it->second;
+    }
+  }
+
+  if (callback)
+  {
+    callback(event);
+    return;
+  }
+
+  auto [fd, condition] = decode_io_key(event.key);
+  if (fd >= 0)
+  {
+    notify_io_ready(fd, condition);
+  }
+}
+
+void Scheduler::stop_reactor()
+{
+  std::unique_ptr<net::IoReactor> reactor;
+  {
+    std::lock_guard lock(reactor_mutex_);
+    reactor = std::move(reactor_);
+    reactor_contexts_.clear();
+  }
+
+  if (reactor)
+  {
+    reactor->stop();
+  }
+}
 
 Task Task::promise_type::get_return_object() noexcept
 {
@@ -241,6 +369,8 @@ Scheduler::~Scheduler()
 {
   shutting_down_.store(true, std::memory_order_relaxed);
 
+  stop_reactor();
+
   workers_.shutdown();
 
   std::vector<TaskHandle> remaining;
@@ -303,12 +433,12 @@ Scheduler::TaskHandle Scheduler::schedule(Task task, std::optional<std::size_t> 
   return handle;
 }
 
-void Scheduler::notify_io_ready(int fd, IOCondition condition)
+void Scheduler::notify_io_ready(IoHandle handle_value, IOCondition condition)
 {
   std::deque<TaskHandle> ready;
   {
     std::lock_guard lock(io_mutex_);
-    IoKey key{fd, condition};
+    IoKey key{handle_value, condition};
     auto it = io_waiters_.find(key);
     if (it != io_waiters_.end())
     {
@@ -328,6 +458,11 @@ void Scheduler::notify_io_ready(int fd, IOCondition condition)
     }
     try_schedule(handle);
   }
+}
+
+void Scheduler::wake_task(TaskHandle handle)
+{
+  request_reschedule(handle);
 }
 
 void Scheduler::wait_idle()
@@ -645,7 +780,7 @@ void Scheduler::release_sequence(std::size_t key, TaskHandle finished)
   }
 }
 
-void Scheduler::mark_waiting_io(TaskHandle handle, int fd, IOCondition condition)
+void Scheduler::mark_waiting_io(TaskHandle handle, IoHandle io_handle, IOCondition condition)
 {
   if (!handle)
   {
@@ -662,7 +797,7 @@ void Scheduler::mark_waiting_io(TaskHandle handle, int fd, IOCondition condition
     }
   }
 
-  IoKey key{fd, condition};
+  IoKey key{io_handle, condition};
   {
     std::lock_guard io_lock(io_mutex_);
     io_waiters_[key].push_back(handle);
@@ -703,5 +838,5 @@ void Scheduler::YieldAwaiter::await_suspend(std::coroutine_handle<> handle) cons
 
 void Scheduler::IoAwaiter::await_suspend(std::coroutine_handle<> handle) const
 {
-  scheduler_.mark_waiting_io(Task::handle_type::from_address(handle.address()), fd_, condition_);
+  scheduler_.mark_waiting_io(Task::handle_type::from_address(handle.address()), handle_, condition_);
 }
