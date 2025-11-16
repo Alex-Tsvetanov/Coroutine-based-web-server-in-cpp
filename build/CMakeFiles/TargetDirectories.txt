@@ -1,4 +1,5 @@
-/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/server.dir
-/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/single-coroutine-server.dir
-/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/edit_cache.dir
-/Users/Alex.Tsvetanov/GitHub/CoroutinesInWebServers/build/CMakeFiles/rebuild_cache.dir
+C:/Users/alext/Documents/GitHub/Coroutine-based-web-server-in-cpp/build/CMakeFiles/edit_cache.dir
+C:/Users/alext/Documents/GitHub/Coroutine-based-web-server-in-cpp/build/CMakeFiles/rebuild_cache.dir
+C:/Users/alext/Documents/GitHub/Coroutine-based-web-server-in-cpp/build/src/CMakeFiles/scheduler_demo.dir
+C:/Users/alext/Documents/GitHub/Coroutine-based-web-server-in-cpp/build/src/CMakeFiles/edit_cache.dir
+C:/Users/alext/Documents/GitHub/Coroutine-based-web-server-in-cpp/build/src/CMakeFiles/rebuild_cache.dir
